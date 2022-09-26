@@ -1,0 +1,465 @@
+# Case study : Mining NASA Metadata
+
+* Metadata is a term that refers to data that gives information about other data.
+
+* In this case, the metadata informs users about what is in these numerous NASA datasets but does not include the content of the datasets themselves.
+* Purpose: Use word cooccurrences and correlations, tf-idf, and topic modeling to explore the connections between the datasets.
+
+  * Can we find datasets that are related to each other?
+  * Can we find clusters of similar datasets? ..
+  
+```{r}
+library(jsonlite)
+metadata <- fromJSON("https://data.nasa.gov/data.json")
+names(metadata$dataset)
+head(metadata$dataset)
+
+#-> It seems like that the tiltle, description and keywords for each dataset may be most fruitful for drawing connections between datasets.
+class(metadata$dataset$title) # character
+class(metadata$dataset$description) # character
+class(metadata$dataset$keyword) #list
+
+
+```
+
+## Wrangling and Tidying the Data
+
+```{r}
+# separate tidy data frames for title, description, and keyword
+library(dplyr)
+
+nasa_title <- data_frame(id = as.character(1:nrow(metadata$dataset)),
+                    title = metadata$dataset$title)
+View(nasa_desc)
+nasa_desc <- data_frame(id = as.character(1:nrow(metadata$dataset)),
+                        desc = metadata$dataset$description)
+nasa_desc %>%
+ select(desc) %>%
+ sample_n(5)
+
+library(tidyr)
+nasa_keyword <- data_frame(id = as.character(1:nrow(metadata$dataset)),
+                           keyword = metadata$dataset$keyword) %>%
+  unnest(keyword) #becasue they are in a list-column
+View(nasa_keyword)
+
+##------------
+
+# Unnest_tokens() for the title and description fields so we can do the text analysis and also remove stop words 
+library(tidytext)
+
+nasa_title <- nasa_title %>% 
+  unnest_tokens(word, title) %>% anti_join(stop_words)
+
+nasa_desc <- nasa_desc %>% 
+  unnest_tokens(word, desc) %>% 
+  anti_join(stop_words)
+```
+
+## Text Analysis
+
+* Count
+
+```{r}
+# What are the common words in NASA dataset titles ?
+nasa_title %>% count(word, sort = TRUE)
+
+# What about the descriptions ?
+nasa_desc %>% count(word, sort = TRUE)
+
+#--> Words like "data", "global" are used very often in NASA titles and descriptions. 
+
+#--> We may want to remove digits and some words like 'v1' from these data for many types of analyses, they are not too meaningful for most audiences.
+## we can do that by making a lis of custom stop words and using anti_join() to remove them from the data.
+my_stopwords <- data_frame(word = c(as.character(1:10), "v1.0","v1",
+                           "v03", "l2", "l3", "l4", "v5.2.0",
+                           "v003", "v004", "v005", "v006", "v7"))
+
+nasa_title  <- nasa_title %>% 
+  anti_join(my_stopwords)
+
+nasa_desc <- nasa_desc %>% 
+  anti_join(my_stopwords)
+# count again
+
+# What are the most common keywords ?
+
+## Change all of the keywords to lower (or uppercase)
+nasa_keyword <- nasa_keyword %>% 
+  mutate(keyword = tolower(keyword))
+
+nasa_keyword %>% group_by(keyword) %>% count(sort = TRUE)
+#--> the words like 'earth science', 'atmosphere' appears most
+```
+
+### Word Co-ocurrences and Correlations
+
+Seeing how often word X is followed by word Y then build a model of the relationships between them.
+
+* Which words commonly occur together (N-gram)
+
+* Which datasets are related to each other
+
+```{r}
+# Examine whih words commonly occur together in the titles, descriptions, and keywords of NASA datasets.
+
+## How many times each pair of words occurs together in a title
+#install.packages("widyr")
+library(widyr)
+
+title_word_paris <- nasa_title %>% 
+  pairwise_count(word, id, sort = TRUE, upper = FALSE)
+
+title_word_paris
+#--> these are the pairs of words that occur together most oftend in the title fields. Some of these words are obviously acronyms used within NASA. and we see how often words like "rosetta", "orbiter" are used.
+
+desc_word_pairs <- nasa_desc %>% 
+  pairwise_count(word, id, sort = TRUE, upper = FALSE)
+
+desc_word_pairs
+#--> these are the pairs of words that occur together most often in description fields. "data" is a very common words in description fields, there is no shortage of data in the dataset at NASA!
+
+keyword_pairs <- nasa_keyword %>% 
+  pairwise_count(keyword,id, sort = TRUE, upper = FALSE)
+keyword_pairs
+
+```
+
+#### Visualization of these co-occuring words 
+
+```{r}
+library(ggplot2)
+#install.packages("igraph")
+#install.packages("ggraph")
+library(igraph)
+library(ggraph)
+
+set.seed(1234)
+title_word_paris %>%
+  filter(n>=500) %>% 
+  graph_from_data_frame() %>% 
+  ggraph(layout = "fr")+
+  geom_edge_link(aes(edge_alpha = n, edge_width = n), edge_colour = "cyan4")+
+  geom_node_point(size = 5)+
+  geom_node_text(aes(label = name), repel = TRUE, point.padding = unit(0.2, "lines"))+
+  theme_void()
+  
+#--> we see some clear clustering in this network of title words, words in NASA dataset titles are largely organized into several families of words that tend to go together. 
+
+```
+
+
+```{r}
+# What about words from the description fields
+
+set.seed(1234)
+desc_word_pairs %>% 
+  filter(n>=2000) %>% 
+  graph_from_data_frame() %>% 
+  ggraph(layout ="fr")+
+  geom_edge_link(aes(edge_alpha = n, edge_width = n), edge_colour = "darkred")+
+  geom_node_point(size = 5)+
+  geom_node_text(aes(label = name), repel = TRUE, point.padding = unit(0.2, "lines"))+
+  theme_void()
+
+#--> this figure shows such strong connections between the top dozen or so words (words like "data", "science", "collected", "set") that we do not see a clear clustering structure in the netword.
+
+#--> we may want to use tf-idf as a metric to find characteristic words for each description field, istead of looking at counts of words
+```
+
+
+```{r}
+# A network of the keywords to see which keywords commonly occur together in the same dataset
+
+set.seed(1234)
+keyword_pairs %>% 
+  filter(n>=700) %>% 
+  graph_from_data_frame() %>% 
+  ggraph(layout = "fr")+
+  geom_edge_link(aes(edge_alpha = n, edge_width = n), edge_colour = "royalblue")+
+  geom_node_point(size = 5)+
+  geom_node_text(aes(label = name), repel = TRUE, point.padding = unit(0.2, "lines"))+
+  theme_void()
+
+#--> we definitely see clustering here, and strong connections between keywords like "earth science" and "atmosphere", "international rosett mission" and "67p/c churyumov-gerasimenko 1(1969
+
+
+##-> These are the most commonly co-occurring words but also just the most common keywords in general.
+```
+
+#### Correlation _ a different way to examine the relationships
+
+**Co-occurrence** network asks a question about **which keyword pairs occur most often**.
+
+**Correlation** network asks a question about **which keywords occur more often together than other keywords**
+
+```{r}
+# Look for those keywords that are more likely to occur together than with other keywords 
+
+keyword_cors <- nasa_keyword %>% 
+  group_by(keyword) %>% 
+  filter(n()>= 50) %>% 
+  pairwise_cor(keyword, id, sort = TRUE, upper = FALSE)
+
+keyword_cors
+
+#--> these keywords at the top have correlation coefficients equal to 1, they always occur together. this means these are redundant keywords
+#--> It may not make sense to continue to use both of the keywords in these sets of pairs, instead just one keyword could be used !!
+
+#-----------
+
+# Visualize the network of keyword correlations
+
+set.seed(1234)
+keyword_cors %>% 
+  filter(correlation > .7) %>% 
+  graph_from_data_frame() %>% 
+  ggraph(layout = "fr")+
+  geom_edge_link(aes(edge_alpha = correlation, edge_width = correlation), edge_colour = "royalblue")+
+  geom_node_point(size = 5)+
+  geom_node_text(aes(label = name), repel = TRUE, point.padding = unit(0.2, "lines"))+
+  theme_void()
+
+#--> This network appears much diferent than the co-occurence network.
+
+#--> Note: the high number of small clusters of keywords, the netword structure can be extracted (for further analysis) from the graph_from_data_frame() function above.
+
+```
+
+### Calculating tf-idf for the "Description" fields
+
+  * **tf** (term frequency) _A measure of how important a word by measure how frequently a word occurs in a document.
+
+  * **idf** (inverse documet frequency) _ Which decreases the weight for commonly used words and increases the weight for words that are not used very much in a collection of documents.
+
+* From the network of "description" fields above, showed us that the description fields are dominated by a few common words like "data","science", "set".
+
+* This would be an excellent opportunity to use tf-idf as a statistic to find characteristic words for individual description fields. 
+
+* We can use tf-idf - the term frequency times inverse document frequency - to **identify words that are especially important to a document within a collection of documents**.
+
+```{r}
+# we alreadly unnest_tokens() so now we can use bind_tf_idf() to calculate tf-idf for each word
+
+desc_tf_idf <- nasa_desc %>% 
+  count(id, word, sort = TRUE) %>%
+  ungroup() %>% 
+  bind_tf_idf(word, id, n)
+  
+# What is the highest tf-idf words in the NASA description fields ?
+
+desc_tf_idf %>% 
+  arrange(-tf_idf) %>% 
+  select(-id)
+
+#-> These are the most important words in the description fields as measured by tf-idf, meaning they are common but not too common
+
+# Howerver, we have run into an issue here, both n and term frequency are equal to 1 for these terms, meaning that these were descrition fields that only had a single word in them. We note that if a description field only contains one word, the tf-idf algorithm will think that is a very important word !!!
+
+# Depending on our analytics goalds, it might be a good idea to throw out all description fields that have very few words !!!!!
+```
+
+**Connecting Description Fields to Keywords**
+
+Distribution of tf-idf for words from datasets labeled with select keywords
+
+```{r}
+# We now join the keyword df and description words with tf-idf, then find the highest tf-idf words for a given keyword.
+
+desc_tf_idf <- full_join(desc_tf_idf, nasa_keyword, by = "id")
+
+# Plot the most important words, as measured by tf-idf for a few keywords used on NASA datasets
+
+desc_tf_idf %>% 
+  filter(!near(tf,1)) %>% 
+  filter(keyword %in% c("solar activity", "clouds", "seismology","astrophysics", "human health", "budget")) %>% 
+  arrange(desc(tf_idf)) %>% 
+  group_by(keyword) %>% 
+  distinct(word, keyword, .keep_all = TRUE) %>% 
+  top_n(15, tf_idf) %>% 
+  ungroup() %>% 
+  mutate(word = factor(word, levels = rev(unique(word)))) %>% 
+  ggplot(aes(word, tf_idf, fill = keyword))+
+  geom_col(show.legend = FALSE)+
+  facet_wrap(~keyword, ncol = 3, scales = "free")+
+  coord_flip()+
+  labs(title = "Highest tf-idf words in NASA metadata description fields", caption = "NASA metadata from https://data.nasa.gov/data.json", x = NULL, y = "tf-idf")
+  
+#--> Identify important description words for each of these keywords
+#--> Datasets labels "seimology" have wordslike "seismic", "recordings", "seasons" in their description. while those labeled with "solor activity" have descriptions chracterized by words like "acrim", "omuvb" and "diode"
+```
+
+## Topic Modeling
+
+* Let's try an additional question of **what th NASA descriptions fields are about**
+
+* We can use topic modeling to model each document (description field) as a mixture of topics and each topic as a mixture of words. We will use **LDA** (latent Dirichlet allocation) for our topic modeling.
+
+#### Casting to a Docment-Term Matrix
+
+```{r}
+# We need to mke a DocumentTermMatrix
+## rows correspond to documents (description texts)
+## columns correspond to terms (i.e words), its a sparse matrix and the values are word counts
+
+# Clean up text - remove some of the nonsense words
+my_stop_words <- bind_rows(stop_words, 
+                           data_frame(word = c("nbsp", "amp", "gt",
+                                            "lt","timesnewromanpsmt", 
+                                            "font", "td", "li", "br", 
+                                            "tr", "quot", "st", "img",
+                                            "src", "strong", "http", 
+                                            "file", "files","c3",
+                                            "https",
+                                            as.character(1:93)), 
+                                      lexicon = rep("custom", 113)))
+
+word_counts <- nasa_desc %>% 
+  anti_join(my_stop_words) %>% 
+  count(id, word, sort = TRUE) %>% 
+  ungroup()
+
+word_counts # This is the number of times each word is used in each document ('description')
+
+# Make a DocumentTermMatrix
+library(tm)
+#install.packages("tm")
+desc_dtm <- word_counts %>% 
+  cast_dtm(id, word, n) # cast from our tidy text to this nontidy format
+
+desc_dtm
+#-> this data contains documents (each of them a NASA description field) and terms (words).
+#---> this document-term matrix is 100% sparse, meaning that almost al of th entries in this matrix are 0. Each non-zero entry corresponds to a certain word appearing in a certain document.
+```
+
+### Ready for Topic Modeling
+
+```{r}
+# Create a LDA model
+## how many topics will we tell the algorithm to makes ? 24
+#install.packages("topicmodels")
+library(topicmodels)
+
+desc_lda <- LDA(desc_dtm, k = 24, control = list(seed = 1234))
+desc_lda
+
+```
+
+### Interpreting the Topic Model
+
+```{r}
+# construct a tidy dataframe that summarize the results of the model
+tidy_lda <- tidy(desc_lda)
+tidy_lda
+#--> beta is the probability of that term (word) belonging to that topic. (some of those values are very very low, and some are not)
+
+# What is each topic about ?
+
+## let's see the top 10 terms of each topic
+
+top_terms <- tidy_lda %>% 
+  group_by(topic) %>% 
+  top_n(10, beta) %>% 
+  ungroup() %>% 
+  arrange(topic, -beta)
+
+top_terms 
+#--> It is not easy to interpret what the topics are about from a df like this
+
+# Lets visualize
+top_terms %>%
+ mutate(term = reorder(term, beta)) %>%
+ group_by(topic, term) %>%
+ arrange(desc(beta)) %>%
+ ungroup() %>%
+ mutate(term = factor(paste(term, topic, sep = "__"),
+ levels = rev(paste(term, topic, sep = "__")))) %>%
+ ggplot(aes(term, beta, fill = as.factor(topic))) +
+ geom_col(show.legend = FALSE) +
+ coord_flip() +
+ scale_x_discrete(labels = function(x) gsub("__.+$", "", x)) +
+ labs(title = "Top 10 terms in each LDA topic",
+ x = NULL, y = expression(beta)) +
+ facet_wrap(~ topic, ncol = 3, scales = "free")
+
+#--> there are meaningful differences between these collections of terms. The topic modeling process has identified groupings we can understand as human readers of these description fields/
+
+#---------
+
+# Which topics are associated with which description fields
+# look at a different probability of this gamma, the probability that each document belongs in each topic
+lda_gamma <- tidy(desc_lda, matrix = "gamma")
+lda_gamma 
+
+ggplot(lda_gamma, aes(gamma))+
+  geom_histogram()+
+  scale_y_log10()+
+  labs(title = "Distribution of  probabilities for all topics",
+       y = "Number of documents", x = expression(gamma))
+
+#--> There are many values near 0, which means there are many documents that do not belong in each topic.
+#--> While there are many values near 1, means these are the documents that do belon in those topics
+
+# We can also look at how the probabilities are distributed within each topic
+ggplot(lda_gamma, aes(gamma, fill = as.factor(topic)))+
+  geom_histogram(show.legend = FALSE)+
+  facet_wrap(~topic, ncol = 4)+
+  scale_y_log10()+
+  labs(title = "Distribution ofprobability for each topic",
+       y = "Number of documents", x= expression(gamma))
+
+#-->
+```
+
+#### Connecting Topic Modeling with Keywords
+
+```{r}
+# connect these topic with the keywords and see what relationships wec can find
+lda_gamma <- full_join(lda_gamma, nasa_keyword, by =c("document" = "id"))
+
+lda_gamma
+
+# keep only the document-topic entries that have the probability greater than some cutoff value (0.9)
+top_keywords <- lda_gamma %>% 
+  filter(gamma > 0.9) %>% 
+  count(topic, keyword, sort = TRUE)
+
+top_keywords
+
+# What are the top keywords for each topic
+top_keywords %>% 
+  group_by(topic) %>% 
+  top_n(5, n) %>% 
+  group_by(topic, keyword) %>% 
+  arrange(desc(n)) %>% 
+  ungroup() %>% 
+  mutate(keyword = factor(paste(keyword, topic, sep = "__"),
+                          levels = rev(paste(keyword, topic, sep ="__")))) %>% 
+  ggplot(aes(keyword, n, fill = as.factor(topic)))+
+  geom_col(show.legend = FALSE)+
+  labs(title = "Top keywords for each LDA topic",
+       x=NULL, y="Number of docments")+
+  coord_flip()+
+  scale_x_discrete(labels = function(x) gsub("__.+$", "", x))+
+  facet_wrap(~topic, ncol =3, scales ="free")
+
+```
+
+* We have built an LDA model with 24 topics for the description fields of the NASA datasets. 
+
+* The plot aboved answer the question: "For the datasets with description fields that have a high probability of belonging to a given topic, what are the most common human-assigned keywords?".
+
+# Summary
+
+* By using a combination of network analysis, tf-idf, and topic modeling. we can have a understanding of how datasets are related at NASA. more information about how keywords are connected to each other ad which datasets are likely to be related.
+
+* The topic model could be used to suggest keywords based on the words in the description field, or the work on th keywords could suggest the most importing combination of keywords for certain areas of study. 
+
+
+
+
+
+
+
+
+
